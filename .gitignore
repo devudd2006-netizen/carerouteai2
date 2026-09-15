@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+
+# Build
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Environment
+.env
+.env.local
+.env.production.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Uploads (medical documents)
+uploads/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local test/scratch artifacts
+server_test.log
+vite-dev.log
+vite-preview.log
+.freebuff/
+
+# Database
+*.db
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
