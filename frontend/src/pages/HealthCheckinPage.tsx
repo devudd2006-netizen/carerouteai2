@@ -81,7 +81,7 @@ export function HealthCheckinPage() {
         new_symptoms_text: data.new_symptoms_text || null,
       };
       const result = await api.createCheckin(payload);
-      navigate(`/patient/screening/${result.checkin_id}`, { state: { screening: result.screening, checkin_id: result.checkin_id } });
+      navigate(`/patient/screening/${result.checkin_id}`, { state: { screening: result.screening, checkin_id: result.checkin_id }, replace: true });
     } catch (err: any) {
       setError(err.message || 'Unable to submit check-in. Please try again.');
     } finally {

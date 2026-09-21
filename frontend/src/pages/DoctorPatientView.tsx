@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { AlertBadge } from '../components/common/AlertBadge';
-import { ArrowLeft, User, Activity, FileText, Pill, Calendar, Stethoscope } from 'lucide-react';
+import { ArrowLeft, User, Activity, FileText, Pill, Calendar, Stethoscope, Plus } from 'lucide-react';
 
 export function DoctorPatientView() {
   const { id } = useParams();
@@ -11,15 +11,22 @@ export function DoctorPatientView() {
   const [loading, setLoading] = useState(true);
   const [consultation, setConsultation] = useState({ notes: '', diagnosis: '' });
   const [saving, setSaving] = useState(false);
+  const [showRx, setShowRx] = useState(false);
+  const [rxSaving, setRxSaving] = useState(false);
+  const [rxItems, setRxItems] = useState([
+    { medicine_name: '', dosage: '', frequency: '', duration: '', instructions: '' },
+  ]);
 
-  useEffect(() => {
+  const reload = () => {
     if (id) {
       api.getDoctorPatient(parseInt(id))
         .then(d => setData(d))
         .catch(() => {})
         .finally(() => setLoading(false));
     }
-  }, [id]);
+  };
+
+  useEffect(() => { reload(); }, [id]);
 
   const saveConsultation = async () => {
     if (!consultation.diagnosis && !consultation.notes) return;
@@ -30,11 +37,32 @@ export function DoctorPatientView() {
         notes: consultation.notes,
         diagnosis: consultation.diagnosis,
       });
-      alert('Consultation notes saved');
+      alert('Consultation notes saved — the patient will see them in their Health Memory timeline.');
       setConsultation({ notes: '', diagnosis: '' });
+      reload();
     } catch (e: any) { alert(e.message); }
     finally { setSaving(false); }
   };
+
+  const savePrescription = async () => {
+    const items = rxItems.filter(i => i.medicine_name.trim());
+    if (items.length === 0) { alert('Add at least one medicine with a name.'); return; }
+    setRxSaving(true);
+    try {
+      await api.createDoctorPrescription({
+        patient_id: parseInt(id!),
+        diagnosis: consultation.diagnosis || undefined,
+        items,
+      });
+      alert('Prescription created — it is now visible on the patient\'s Prescriptions page.');
+      setRxItems([{ medicine_name: '', dosage: '', frequency: '', duration: '', instructions: '' }]);
+      setShowRx(false);
+    } catch (e: any) { alert(e.message); }
+    finally { setRxSaving(false); }
+  };
+
+  const updateRx = (idx: number, field: string, value: string) =>
+    setRxItems(items => items.map((it, i) => (i === idx ? { ...it, [field]: value } : it)));
 
   if (loading) return <LoadingSpinner message="Loading patient data..." />;
   if (!data) return <p className="text-center py-12 text-gray-500">Patient not found</p>;
@@ -120,6 +148,42 @@ export function DoctorPatientView() {
             {saving ? 'Saving...' : 'Save Assessment'}
           </button>
         </div>
+      </div>
+
+      {/* Prescription Writer */}
+      <div className="card border-purple-200">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-bold text-gray-900 flex items-center gap-2">
+            <Pill size={16} className="text-purple-500" /> Prescription
+          </h3>
+          <button onClick={() => setShowRx(s => !s)} className="btn-secondary text-sm flex items-center gap-2">
+            <Plus size={14} /> {showRx ? 'Close' : 'Write Prescription'}
+          </button>
+        </div>
+        {showRx && (
+          <div className="space-y-3">
+            {rxItems.map((item, idx) => (
+              <div key={idx} className="p-3 bg-gray-50 rounded-lg grid sm:grid-cols-5 gap-2">
+                <input className="input-field" placeholder="Medicine *" value={item.medicine_name} onChange={e => updateRx(idx, 'medicine_name', e.target.value)} />
+                <input className="input-field" placeholder="Dosage" value={item.dosage} onChange={e => updateRx(idx, 'dosage', e.target.value)} />
+                <input className="input-field" placeholder="Frequency" value={item.frequency} onChange={e => updateRx(idx, 'frequency', e.target.value)} />
+                <input className="input-field" placeholder="Duration" value={item.duration} onChange={e => updateRx(idx, 'duration', e.target.value)} />
+                <input className="input-field" placeholder="Instructions" value={item.instructions} onChange={e => updateRx(idx, 'instructions', e.target.value)} />
+              </div>
+            ))}
+            <div className="flex gap-3">
+              <button
+                onClick={() => setRxItems(items => [...items, { medicine_name: '', dosage: '', frequency: '', duration: '', instructions: '' }])}
+                className="btn-secondary text-sm"
+              >
+                + Add Medicine
+              </button>
+              <button onClick={savePrescription} className="btn-primary text-sm" disabled={rxSaving}>
+                {rxSaving ? 'Saving...' : 'Create Prescription'}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">

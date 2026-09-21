@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { LoadingSpinner } from './components/common/LoadingSpinner';
@@ -23,15 +23,17 @@ import { EmergencyPage } from './pages/EmergencyPage';
 import { DocumentsPage } from './pages/DocumentsPage';
 import { MedicationsPage } from './pages/MedicationsPage';
 import { AppointmentsPage } from './pages/AppointmentsPage';
+import { PrescriptionsPage } from './pages/PrescriptionsPage';
 import { PatientProfilePage } from './pages/PatientProfilePage';
 
 // Doctor Pages
 import { DoctorDashboard } from './pages/DoctorDashboard';
 import { DoctorPatientView } from './pages/DoctorPatientView';
+import { DoctorAppointmentsPage } from './pages/DoctorAppointmentsPage';
 
-// Community Pages
-import { CommunityDashboard } from './pages/CommunityDashboard';
-import { CommunityMapPage } from './pages/CommunityMapPage';
+// Community Pages (lazy: pulls in Leaflet map tiles + Recharts)
+const CommunityDashboard = lazy(() => import('./pages/CommunityDashboard').then(m => ({ default: m.CommunityDashboard })));
+const CommunityMapPage = lazy(() => import('./pages/CommunityMapPage').then(m => ({ default: m.CommunityMapPage })));
 
 // Admin Pages
 import { AdminDashboard } from './pages/AdminDashboard';
@@ -63,6 +65,7 @@ function App() {
           <Route path="emergency" element={<EmergencyPage />} />
           <Route path="documents" element={<DocumentsPage />} />
           <Route path="medications" element={<MedicationsPage />} />
+          <Route path="prescriptions" element={<PrescriptionsPage />} />
           <Route path="appointments" element={<AppointmentsPage />} />
           <Route path="profile" element={<PatientProfilePage />} />
         </Route>
@@ -70,13 +73,14 @@ function App() {
         {/* Doctor Routes */}
         <Route path="/doctor" element={<ProtectedRoute roles={['doctor']}><DoctorLayout /></ProtectedRoute>}>
           <Route index element={<DoctorDashboard />} />
+          <Route path="appointments" element={<DoctorAppointmentsPage />} />
           <Route path="patients/:id" element={<DoctorPatientView />} />
         </Route>
 
         {/* Community Routes */}
         <Route path="/community" element={<ProtectedRoute roles={['admin', 'community_authority']}><AdminLayout /></ProtectedRoute>}>
-          <Route index element={<CommunityDashboard />} />
-          <Route path="map" element={<CommunityMapPage />} />
+          <Route index element={<Suspense fallback={<LoadingSpinner />}><CommunityDashboard /></Suspense>} />
+          <Route path="map" element={<Suspense fallback={<LoadingSpinner />}><CommunityMapPage /></Suspense>} />
         </Route>
 
         {/* Admin Routes */}

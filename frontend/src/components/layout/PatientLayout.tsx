@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
+import { api } from '../../services/api';
 import {
   Home, Activity, Brain, MapPin, AlertTriangle, FileText,
   Pill, Calendar, User, Heart, LogOut, Menu, X, Stethoscope
@@ -13,6 +14,7 @@ const navItems = [
   { path: '/patient/care-route', label: 'Find Care', icon: MapPin },
   { path: '/patient/documents', label: 'Documents', icon: FileText },
   { path: '/patient/medications', label: 'Medications', icon: Pill },
+  { path: '/patient/prescriptions', label: 'Prescriptions', icon: Stethoscope },
   { path: '/patient/appointments', label: 'Appointments', icon: Calendar },
   { path: '/patient/profile', label: 'My Profile', icon: User },
 ];
@@ -22,6 +24,22 @@ export function PatientLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
+  const [upcomingCount, setUpcomingCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getAppointments()
+      .then(d => {
+        if (cancelled) return;
+        const upcoming = (d.appointments || []).filter(
+          (a: any) => a.status === 'scheduled' &&
+            a.appointment_date && new Date(a.appointment_date) >= new Date()
+        );
+        setUpcomingCount(upcoming.length);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [location.pathname]);
 
   const isActive = (path: string, exact?: boolean) =>
     exact ? location.pathname === path : location.pathname.startsWith(path);
@@ -56,6 +74,14 @@ export function PatientLayout() {
             >
               <item.icon size={18} />
               {item.label}
+              {item.label === 'Appointments' && upcomingCount > 0 && (
+                <span
+                  className="ml-auto bg-primary-600 text-white text-xs font-semibold px-2 py-0.5 rounded-full"
+                  title={`${upcomingCount} upcoming appointment${upcomingCount > 1 ? 's' : ''}`}
+                >
+                  {upcomingCount}
+                </span>
+              )}
             </Link>
           ))}
         </nav>

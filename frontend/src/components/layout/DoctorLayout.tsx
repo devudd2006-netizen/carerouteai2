@@ -1,12 +1,16 @@
 import React from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-import { Home, Users, LogOut, Menu, Stethoscope } from 'lucide-react';
+import { Home, Users, Calendar, LogOut, Menu, Stethoscope } from 'lucide-react';
 
 export function DoctorLayout() {
   const { user, logout } = useAuth();
+  const location = useLocation();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
+
+  const isActive = (path: string, exact?: boolean) =>
+    exact ? location.pathname === path : location.pathname.startsWith(path);
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
@@ -18,11 +22,14 @@ export function DoctorLayout() {
           <button className="ml-auto lg:hidden" onClick={() => setSidebarOpen(false)}>✕</button>
         </div>
         <nav className="p-3 space-y-1">
-          <Link to="/doctor" onClick={() => setSidebarOpen(false)} className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium ${location.pathname === '/doctor' ? 'bg-primary-50 text-primary-700' : 'text-gray-600 hover:bg-gray-50'}`}>
+          <Link to="/doctor" onClick={() => setSidebarOpen(false)} className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium ${isActive('/doctor', true) ? 'bg-primary-50 text-primary-700' : 'text-gray-600 hover:bg-gray-50'}`}>
             <Home size={18} /> Dashboard
           </Link>
-          <Link to="/doctor" onClick={() => setSidebarOpen(false)} className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-50">
+          <Link to="/doctor" onClick={() => setSidebarOpen(false)} className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium ${isActive('/doctor/patients') ? 'bg-primary-50 text-primary-700' : 'text-gray-600 hover:bg-gray-50'}`}>
             <Users size={18} /> My Patients
+          </Link>
+          <Link to="/doctor/appointments" onClick={() => setSidebarOpen(false)} className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium ${isActive('/doctor/appointments') ? 'bg-primary-50 text-primary-700' : 'text-gray-600 hover:bg-gray-50'}`}>
+            <Calendar size={18} /> Appointments
           </Link>
         </nav>
         <div className="absolute bottom-0 left-0 right-0 p-3 border-t">

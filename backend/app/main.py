@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
-from app.db.database import init_db
+from app.db.database import init_db, run_light_migrations
 
 settings = get_settings()
 
@@ -81,6 +81,7 @@ async def startup():
     """Initialize database on startup."""
     logger.info("Initializing database...")
     init_db()
+    run_light_migrations()
     logger.info("Database initialized.")
 
 

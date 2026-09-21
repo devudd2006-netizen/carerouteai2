@@ -260,9 +260,17 @@ def seed():
             # 2-3 check-ins per patient
             for j in range(random.randint(2, 3)):
                 scenario = random.choice(SYMPTOM_SCENARIOS)
+                # The symptoms JSON is a display list, so only real symptom names
+                # (not scalar config keys like feeling_today/pain_severity).
+                display_symptoms = [
+                    k for k in scenario["symptoms"]
+                    if k in {"fever", "cough", "breathing_difficulty", "chest_discomfort",
+                             "headache", "dizziness", "weakness", "pain", "vomiting",
+                             "diarrhea", "fatigue"}
+                ]
                 checkin = HealthCheckin(
                     patient_id=profile.id,
-                    symptoms=list(scenario["symptoms"].keys()),
+                    symptoms=display_symptoms,
                     symptom_details=scenario["symptoms"],
                     feeling_today=scenario["symptoms"].get("feeling_today", "okay"),
                     fever=scenario["symptoms"].get("fever", False),
@@ -392,13 +400,22 @@ def seed():
         print("  ✅ Community health signals created")
         
         # 9. Create Appointments
+        appt_reasons = [
+            "General consultation",
+            "Follow-up consultation",
+            "Review lab test results",
+            "Blood pressure check",
+            "Medication review",
+            "Post-treatment follow-up",
+        ]
         for i, profile in enumerate(patient_profiles[:5]):
+            doctor_user = doctor_users[i % len(doctor_users)]
             for j in range(2):
                 appointment = Appointment(
                     patient_id=profile.id,
-                    doctor_id=doctor_users[i % len(doctor_users)].id,
+                    doctor_id=doctor_user.id,
                     appointment_date=datetime.now(timezone.utc) + timedelta(days=random.randint(-10, 14)),
-                    reason="Follow-up consultation" if j > 0 else "General consultation",
+                    reason=random.choice(appt_reasons),
                     status=random.choice(["scheduled", "completed"]),
                     is_follow_up=(j > 0),
                 )

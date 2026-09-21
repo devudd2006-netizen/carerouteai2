@@ -3,20 +3,26 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { AlertBadge } from '../components/common/AlertBadge';
-import { Users, Activity, AlertTriangle, Clock, ChevronRight } from 'lucide-react';
+import { Users, AlertTriangle, Clock, ChevronRight, CalendarCheck } from 'lucide-react';
 
 export function DoctorDashboard() {
   const [patients, setPatients] = useState<any[]>([]);
+  const [appointments, setAppointments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.getDoctorPatients()
-      .then(d => setPatients(d.patients || []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    Promise.all([
+      api.getDoctorPatients().then(d => setPatients(d.patients || [])).catch(() => {}),
+      api.getDoctorAppointments().then(d => setAppointments(d.appointments || [])).catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, []);
 
   if (loading) return <LoadingSpinner message="Loading patient data..." />;
+
+  const today = new Date().toDateString();
+  const todaysAppointments = appointments
+    .filter(a => a.status === 'scheduled' && a.appointment_date && new Date(a.appointment_date).toDateString() === today)
+    .sort((a, b) => new Date(a.appointment_date).getTime() - new Date(b.appointment_date).getTime());
 
   return (
     <div className="space-y-6">
@@ -42,7 +48,48 @@ export function DoctorDashboard() {
             </div>
           </div>
         </div>
+        <div className="card">
+          <div className="flex items-center gap-3">
+            <CalendarCheck className="text-blue-500" size={24} />
+            <div>
+              <p className="text-xs text-gray-500">Today's Appointments</p>
+              <p className="text-2xl font-bold">{todaysAppointments.length}</p>
+            </div>
+          </div>
+        </div>
+        <div className="card">
+          <div className="flex items-center gap-3">
+            <Clock className="text-purple-500" size={24} />
+            <div>
+              <p className="text-xs text-gray-500">Upcoming Scheduled</p>
+              <p className="text-2xl font-bold">{appointments.filter(a => a.status === 'scheduled').length}</p>
+            </div>
+          </div>
+        </div>
       </div>
+
+      {/* Today's Agenda */}
+      {todaysAppointments.length > 0 && (
+        <div className="card border-primary-200 bg-primary-50/40">
+          <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+            <CalendarCheck size={18} className="text-primary-600" /> Today's Agenda
+          </h3>
+          <div className="space-y-3">
+            {todaysAppointments.map(a => (
+              <div key={a.id} className="flex items-center gap-3 bg-white rounded-lg p-3 border border-primary-100">
+                <Clock size={16} className="text-primary-500 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">
+                    {new Date(a.appointment_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} — {a.patient_name}
+                  </p>
+                  <p className="text-xs text-gray-500 truncate">{a.reason || 'Consultation'}</p>
+                </div>
+                <Link to="/doctor/appointments" className="text-xs text-primary-600 hover:underline flex-shrink-0">Manage</Link>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Patient List */}
       <div className="card">

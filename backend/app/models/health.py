@@ -112,6 +112,11 @@ class MedicationReminder(Base):
     dosage = Column(String(100), nullable=True)
     frequency = Column(String(100), nullable=True)  # morning, afternoon, night, or custom
     time_of_day = Column(String(50), nullable=True)
+    instructions = Column(Text, nullable=True)
+    # "doctor" = from a doctor's prescription/care plan; "patient" = self-added
+    # by the patient (e.g. OTC or existing meds they want tracked).
+    source = Column(String(20), default="doctor", nullable=False)
+    added_by = Column(Integer, ForeignKey("users.id"), nullable=True)  # user id of the adder
     
     is_active = Column(Boolean, default=True)
     

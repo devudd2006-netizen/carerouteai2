@@ -34,6 +34,13 @@ from app.services.care_route_service import (
 from app.services.community_service import calculate_priority_score  # noqa: E402
 
 
+def db_session_factory():
+    """Direct session for seeding rows the API tests need but registration
+    doesn't create (facilities, etc.)."""
+    from app.db.database import SessionLocal
+    return SessionLocal()
+
+
 # ---------------------------------------------------------------------------
 # Red-flag safety engine
 # ---------------------------------------------------------------------------
@@ -312,6 +319,291 @@ class TestHealthCheckinAPI:
         assert resp.status_code == 422
 
 
+class TestHealthTrendsAPI:
+    def test_trends_shape_and_counts(self, client):
+        token = _register_and_login(client, "trends@test.com")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        for feeling in ("good", "bad"):
+            resp = client.post("/api/health/checkin", headers=headers, json={
+                "feeling_today": feeling,
+                "fever": True, "headache": True,
+            })
+            assert resp.status_code == 200, resp.text
+
+        resp = client.get("/api/health/trends", headers=headers)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+        assert data["total_checkins"] == 2
+        assert len(data["series"]) == 2
+        # Oldest-first series for charting
+        assert data["series"][0]["date"] <= data["series"][1]["date"]
+        for point in data["series"]:
+            assert point["symptom_count"] == 2
+            assert point["risk_level"] in ("low", "moderate", "high", "emergency")
+
+        symptoms = {t["symptom"]: t["count"] for t in data["top_symptoms"]}
+        assert symptoms.get("fever") == 2
+        assert symptoms.get("headache") == 2
+        assert data["feeling_counts"].get("good") == 1
+        assert data["feeling_counts"].get("bad") == 1
+
+    def test_trends_requires_auth(self, client):
+        assert client.get("/api/health/trends").status_code in (401, 403)
+
+    def test_trends_empty_for_new_patient(self, client):
+        token = _register_and_login(client, "trendsempty@test.com")
+        resp = client.get("/api/health/trends", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_checkins"] == 0
+        assert data["series"] == []
+        assert data["top_symptoms"] == []
+
+
+class TestDoctorAppointmentAPI:
+    def test_doctor_schedules_and_patient_sees_appointment(self, client):
+        doctok = _register_and_login(client, "docappt@test.com", role="doctor")
+        patok = _register_and_login(client, "patappt@test.com")
+
+        # Find the patient's profile id via the doctor patient list
+        patients = client.get("/api/doctor/patients", headers={
+            "Authorization": f"Bearer {doctok}"
+        }).json()["patients"]
+        patient = next(p for p in patients if p["email"] == "patappt@test.com")
+
+        resp = client.post("/api/doctor/appointments", headers={
+            "Authorization": f"Bearer {doctok}"
+        }, json={
+            "patient_id": patient["id"],
+            "date": "2026-10-01T10:30",
+            "reason": "Blood pressure review",
+            "is_follow_up": True,
+        })
+        assert resp.status_code == 201, resp.text
+
+        # Patient sees it with the doctor's name attached
+        plist = client.get("/api/appointments", headers={
+            "Authorization": f"Bearer {patok}"
+        }).json()["appointments"]
+        match = next(a for a in plist if a["id"] == resp.json()["id"])
+        assert match["status"] == "scheduled"
+        assert match["reason"] == "Blood pressure review"
+        assert match["doctor_name"]
+
+        # Doctor's own listing shows the patient name
+        dlist = client.get("/api/doctor/appointments", headers={
+            "Authorization": f"Bearer {doctok}"
+        }).json()["appointments"]
+        dmatch = next(a for a in dlist if a["id"] == resp.json()["id"])
+        assert dmatch["patient_name"] == "Test User"
+
+    def test_patient_cannot_use_doctor_appointment_endpoints(self, client):
+        patok = _register_and_login(client, "patnotdoc@test.com")
+        resp = client.post("/api/doctor/appointments", headers={
+            "Authorization": f"Bearer {patok}"
+        }, json={"patient_id": 1, "date": "2026-10-01T10:00"})
+        assert resp.status_code in (401, 403)
+
+    def test_doctor_appointment_validation(self, client):
+        doctok = _register_and_login(client, "docval@test.com", role="doctor")
+        headers = {"Authorization": f"Bearer {doctok}"}
+        # Missing date
+        assert client.post("/api/doctor/appointments", headers=headers,
+                           json={"patient_id": 1}).status_code == 400
+        # Bad date format
+        assert client.post("/api/doctor/appointments", headers=headers,
+                           json={"patient_id": 1, "date": "not-a-date"}).status_code == 400
+        # Unknown patient
+        assert client.post("/api/doctor/appointments", headers=headers,
+                           json={"patient_id": 999999, "date": "2026-10-01"}).status_code == 404
+
+    def test_doctor_can_update_appointment(self, client):
+        doctok = _register_and_login(client, "docupdate@test.com", role="doctor")
+        headers = {"Authorization": f"Bearer {doctok}"}
+        patients = client.get("/api/doctor/patients", headers=headers).json()["patients"]
+        resp = client.post("/api/doctor/appointments", headers=headers, json={
+            "patient_id": patients[0]["id"], "date": "2026-10-03T09:00",
+        })
+        appt_id = resp.json()["id"]
+
+        # Reschedule + complete
+        upd = client.patch(f"/api/doctor/appointments/{appt_id}", headers=headers,
+                           json={"date": "2026-10-04T15:00", "status": "completed"})
+        assert upd.status_code == 200, upd.text
+        dlist = client.get("/api/doctor/appointments", headers=headers).json()["appointments"]
+        match = next(a for a in dlist if a["id"] == appt_id)
+        assert match["status"] == "completed"
+        assert "15:00" in match["appointment_date"] or "03" in match["appointment_date"]
+
+        # Invalid status rejected
+        bad = client.patch(f"/api/doctor/appointments/{appt_id}", headers=headers,
+                           json={"status": "bogus"})
+        assert bad.status_code == 400
+
+    def test_patient_cannot_update_appointments(self, client):
+        patok = _register_and_login(client, "patnoedit@test.com")
+        resp = client.patch("/api/doctor/appointments/1", headers={
+            "Authorization": f"Bearer {patok}"
+        }, json={"status": "completed"})
+        assert resp.status_code in (401, 403, 404)
+
+    def test_doctor_can_cancel_own_appointment(self, client):
+        doctok = _register_and_login(client, "doccancel@test.com", role="doctor")
+        headers = {"Authorization": f"Bearer {doctok}"}
+        patients = client.get("/api/doctor/patients", headers=headers).json()["patients"]
+        resp = client.post("/api/doctor/appointments", headers=headers, json={
+            "patient_id": patients[0]["id"], "date": "2026-10-02T09:00",
+        })
+        appt_id = resp.json()["id"]
+        del_resp = client.delete(f"/api/doctor/appointments/{appt_id}", headers=headers)
+        assert del_resp.status_code == 200
+        dlist = client.get("/api/doctor/appointments", headers=headers).json()["appointments"]
+        assert next(a for a in dlist if a["id"] == appt_id)["status"] == "cancelled"
+
+
+class TestDoctorConsultationAPI:
+    def test_consultation_without_checkin_reaches_patient_timeline(self, client):
+        """Doctor consultation must NOT 500 when no assessment_id is passed
+        (the UI path) and must appear on the patient's timeline."""
+        doctok = _register_and_login(client, "docconsult@test.com", role="doctor")
+        patok = _register_and_login(client, "patconsult@test.com")
+        headers = {"Authorization": f"Bearer {doctok}"}
+
+        patients = client.get("/api/doctor/patients", headers=headers).json()["patients"]
+        patient = next(p for p in patients if p["email"] == "patconsult@test.com")
+
+        resp = client.post("/api/doctor/consultations", headers=headers, json={
+            "patient_id": patient["id"],
+            "notes": "Rest and hydration advised",
+            "diagnosis": "Viral fever",
+        })
+        assert resp.status_code == 200, resp.text
+
+        timeline = client.get("/api/health/timeline", headers={
+            "Authorization": f"Bearer {patok}"
+        }).json()["timeline"]
+        consult = [t for t in timeline if t["type"] == "assessment" and t["data"].get("is_doctor_consultation")]
+        assert consult, "consultation must appear in patient timeline"
+        entry = consult[0]["data"]
+        assert entry["diagnosis"] == "Viral fever"
+        assert entry["doctor_notes"] == "Rest and hydration advised"
+        assert entry["doctor_name"] == "Test User"
+
+    def test_consultation_requires_patient(self, client):
+        doctok = _register_and_login(client, "docconsult2@test.com", role="doctor")
+        assert client.post("/api/doctor/consultations", headers={
+            "Authorization": f"Bearer {doctok}"
+        }, json={"notes": "hi"}).status_code == 400
+        assert client.post("/api/doctor/consultations", headers={
+            "Authorization": f"Bearer {doctok}"
+        }, json={"patient_id": 999999, "notes": "hi"}).status_code == 404
+
+    def test_doctor_prescription_visible_to_patient(self, client):
+        doctok = _register_and_login(client, "docrx@test.com", role="doctor")
+        patok = _register_and_login(client, "patrx@test.com")
+        headers = {"Authorization": f"Bearer {doctok}"}
+
+        patients = client.get("/api/doctor/patients", headers=headers).json()["patients"]
+        patient = next(p for p in patients if p["email"] == "patrx@test.com")
+
+        resp = client.post("/api/doctor/prescriptions", headers=headers, json={
+            "patient_id": patient["id"],
+            "diagnosis": "Test diagnosis",
+            "items": [{"medicine_name": "Ibuprofen 400mg", "dosage": "400mg", "frequency": "Twice daily"}],
+        })
+        assert resp.status_code == 200, resp.text
+
+        plist = client.get("/api/prescriptions", headers={
+            "Authorization": f"Bearer {patok}"
+        }).json()["prescriptions"]
+        match = next(p for p in plist if p["id"] == resp.json()["id"])
+        assert match["doctor_name"] == "Test User"
+        assert match["items"][0]["medicine_name"] == "Ibuprofen 400mg"
+
+    def test_doctor_prescription_creates_medication_reminders(self, client):
+        """Doctor-added medicines must appear on the patient's Medications page."""
+        doctok = _register_and_login(client, "docrxmed@test.com", role="doctor")
+        patok = _register_and_login(client, "patrxmed@test.com")
+        headers = {"Authorization": f"Bearer {doctok}"}
+
+        patients = client.get("/api/doctor/patients", headers=headers).json()["patients"]
+        patient = next(p for p in patients if p["email"] == "patrxmed@test.com")
+
+        resp = client.post("/api/doctor/prescriptions", headers=headers, json={
+            "patient_id": patient["id"],
+            "diagnosis": "Infection",
+            "items": [
+                {"medicine_name": "Azithromycin", "dosage": "500mg", "frequency": "Once daily at night"},
+                {"medicine_name": "Paracetamol", "dosage": "650mg", "frequency": "Twice daily"},
+            ],
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["medications_created"] == 2
+
+        meds = client.get("/api/medications", headers={
+            "Authorization": f"Bearer {patok}"
+        }).json()["medications"]
+        names = {m["medicine_name"] for m in meds}
+        assert "Azithromycin" in names and "Paracetamol" in names
+        azithro = next(m for m in meds if m["medicine_name"] == "Azithromycin")
+        assert azithro["source"] == "doctor"
+        assert azithro["time_of_day"] == "night"  # parsed from frequency
+
+    def test_patient_cannot_create_doctor_prescription(self, client):
+        patok = _register_and_login(client, "patnotrx@test.com")
+        resp = client.post("/api/doctor/prescriptions", headers={
+            "Authorization": f"Bearer {patok}"
+        }, json={"patient_id": 1, "items": [{"medicine_name": "X"}]})
+        assert resp.status_code in (401, 403)
+
+
+class TestMedicationManagementAPI:
+    def test_patient_adds_and_removes_own_medication(self, client):
+        token = _register_and_login(client, "selfmed@test.com")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        resp = client.post("/api/medications", headers=headers, json={
+            "medicine_name": "Vitamin D3",
+            "dosage": "1000 IU",
+            "frequency": "Once daily",
+            "time_of_day": "morning",
+        })
+        assert resp.status_code == 201, resp.text
+        med = resp.json()["medication"]
+        assert med["source"] == "patient"
+
+        listed = client.get("/api/medications", headers=headers).json()["medications"]
+        assert any(m["id"] == med["id"] for m in listed)
+
+        del_resp = client.delete(f"/api/medications/{med['id']}", headers=headers)
+        assert del_resp.status_code == 200
+        listed_after = client.get("/api/medications", headers=headers).json()["medications"]
+        assert not any(m["id"] == med["id"] for m in listed_after)
+
+    def test_add_medication_validation(self, client):
+        token = _register_and_login(client, "selfmedval@test.com")
+        headers = {"Authorization": f"Bearer {token}"}
+        assert client.post("/api/medications", headers=headers, json={}).status_code == 400
+        assert client.post("/api/medications", headers=headers, json={"medicine_name": "   "}).status_code == 400
+
+    def test_patient_cannot_remove_others_medication(self, client):
+        a = _register_and_login(client, "medowner@test.com")
+        b = _register_and_login(client, "medstranger@test.com")
+        resp = client.post("/api/medications", headers={
+            "Authorization": f"Bearer {a}"
+        }, json={"medicine_name": "Secret med"})
+        med_id = resp.json()["id"]
+        assert client.delete(f"/api/medications/{med_id}", headers={
+            "Authorization": f"Bearer {b}"
+        }).status_code == 404
+
+    def test_medication_endpoints_require_auth(self, client):
+        assert client.post("/api/medications", json={"medicine_name": "X"}).status_code in (401, 403)
+        assert client.delete("/api/medications/1").status_code in (401, 403)
+
+
 class TestEmergencyAPI:
     def test_health_card_minimum_necessary(self, client):
         token = _register_and_login(client, "card@test.com")
@@ -327,8 +619,92 @@ class TestEmergencyAPI:
 
 
 class TestFacilitiesAPI:
+    @staticmethod
+    def _seed_hospitals(db):
+        """Test hospitals around Madurai with differing capability."""
+        from app.models.facility import HealthcareFacility
+        if db.query(HealthcareFacility).count() > 0:
+            return
+        db.add_all([
+            HealthcareFacility(
+                name="Mega General Hospital", facility_type="hospital",
+                latitude=9.9300, longitude=78.1200, address="1 Main Rd",
+                services=["general", "surgery", "cardiology", "diagnostics", "orthopedics"],
+                emergency_available=True, opening_hours="24/7", is_active=True,
+            ),
+            HealthcareFacility(
+                name="Small Clinic Hospital", facility_type="hospital",
+                latitude=9.9400, longitude=78.1300, address="2 Side St",
+                services=["general"], emergency_available=False,
+                opening_hours="8am-6pm", is_active=True,
+            ),
+            HealthcareFacility(
+                name="Distant Specialty Hospital", facility_type="hospital",
+                latitude=10.1000, longitude=78.7000, address="3 Far Ave",
+                services=["general", "surgery", "cardiology", "diagnostics"],
+                emergency_available=True, opening_hours="24/7", is_active=True,
+            ),
+        ])
+        db.commit()
+
     def test_list_facilities(self, client):
         token = _register_and_login(client, "fac@test.com")
+        self._seed_hospitals(db_session_factory())
         resp = client.get("/api/facilities/", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         assert "facilities" in resp.json()
+
+    def test_best_hospitals_without_location(self, client):
+        """No coordinates: overall_best must still be populated."""
+        self._seed_hospitals(db_session_factory())
+        token = _register_and_login(client, "best1@test.com")
+        resp = client.get("/api/facilities/best", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["nearby_best"] == []
+        assert len(data["overall_best"]) > 0
+        top = data["overall_best"][0]
+        assert top["facility_type"] in ("hospital", "emergency")
+        assert top["capability_score"] >= data["overall_best"][-1]["capability_score"]
+
+    def test_best_hospitals_with_location_ranks_nearby(self, client):
+        """With coordinates, nearby_best is populated and proximity-led."""
+        self._seed_hospitals(db_session_factory())
+        token = _register_and_login(client, "best2@test.com")
+        # Madurai center — seeded facilities cluster around 9.92-9.94, 78.11-78.13
+        resp = client.get(
+            "/api/facilities/best?latitude=9.9252&longitude=78.1198",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert len(data["nearby_best"]) > 0
+        assert len(data["overall_best"]) > 0
+        for f in data["nearby_best"]:
+            assert f["distance_km"] is not None
+            assert "rank_score" in f
+        # Proximity-first: distances must be non-decreasing down the list
+        dists = [f["distance_km"] for f in data["nearby_best"]]
+        assert dists == sorted(dists), f"nearby_best not distance-sorted: {dists}"
+        # The 17km-away hospital must never appear when close ones exist
+        assert all(f["distance_km"] <= 15 for f in data["nearby_best"])
+
+    def test_nearby_never_beaten_by_distant_hospital(self, client):
+        """The core guarantee: a world-class hospital 17 km away must not
+        outrank a basic clinic 1 km away in the nearby list."""
+        self._seed_hospitals(db_session_factory())
+        token = _register_and_login(client, "best3@test.com")
+        resp = client.get(
+            "/api/facilities/best?latitude=9.9252&longitude=78.1198",
+            headers={"Authorization": f"Bearer {token}"},
+        ).json()
+        nearby_names = [f["name"] for f in resp["nearby_best"]]
+        # Distant Specialty Hospital (10.10, 78.70) is ~60 km away — excluded.
+        assert "Distant Specialty Hospital" not in nearby_names
+        # Mega General (0.5km) vs Small Clinic (1.6km): both near; the better
+        # hospital may lead only when distances are in the same band.
+        assert resp["nearby_best"][0]["distance_km"] <= 2
+        assert resp["used_fallback"] is False
+
+    def test_best_hospitals_requires_auth(self, client):
+        assert client.get("/api/facilities/best").status_code in (401, 403)

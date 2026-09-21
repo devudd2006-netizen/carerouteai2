@@ -13,9 +13,23 @@ from app.models.health import CarePlan, MedicationReminder, MedicationLog
 from app.models.document import Prescription, PrescriptionItem
 from app.schemas.health import CarePlanCreate, CarePlanResponse
 from app.services.ai_service import ai_prescription_extract
-from app.core.auth import get_current_user_id, require_role
+from app.core.auth import get_current_user_id, get_current_user_role
 
 router = APIRouter(prefix="/api", tags=["Prescriptions & Care Plans"])
+
+
+def _med_dict(m: MedicationReminder) -> dict:
+    return {
+        "id": m.id,
+        "medicine_name": m.medicine_name,
+        "dosage": m.dosage,
+        "frequency": m.frequency,
+        "time_of_day": m.time_of_day,
+        "instructions": m.instructions,
+        "source": m.source or "doctor",
+        "added_by": m.added_by,
+        "is_active": m.is_active,
+    }
 
 
 @router.get("/prescriptions")
@@ -37,11 +51,16 @@ def list_prescriptions(
         items = db.query(PrescriptionItem).filter(
             PrescriptionItem.prescription_id == p.id
         ).all()
+        doctor_name = None
+        if p.doctor_id:
+            doctor = db.query(User).filter(User.id == p.doctor_id).first()
+            doctor_name = doctor.full_name if doctor else None
         result.append({
             "id": p.id,
             "diagnosis": p.diagnosis,
             "notes": p.notes,
             "is_confirmed": p.is_confirmed,
+            "doctor_name": doctor_name,
             "items": [{"id": i.id, "medicine_name": i.medicine_name, "dosage": i.dosage, "frequency": i.frequency, "duration": i.duration, "instructions": i.instructions, "needs_verification": i.needs_verification} for i in items],
             "created_at": str(p.created_at) if p.created_at else None,
         })
@@ -191,6 +210,8 @@ def confirm_prescription(
                 dosage=item.dosage,
                 frequency=item.frequency,
                 time_of_day=time_of_day,
+                source="patient",
+                added_by=user_id,
             ))
     
     db.commit()
@@ -290,11 +311,8 @@ def list_medications(
     return {
         "medications": [
             {
-                "id": m.id,
-                "medicine_name": m.medicine_name,
-                "dosage": m.dosage,
-                "frequency": m.frequency,
-                "time_of_day": m.time_of_day,
+                **_med_dict(m),
+                "care_plan_id": m.care_plan_id,
             }
             for m in reminders
         ],
@@ -302,6 +320,65 @@ def list_medications(
         "total_doses": total,
         "doses_taken": taken,
     }
+
+
+@router.post("/medications", status_code=201)
+def add_medication(
+    data: dict,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Patient adds their own medication to track (OTC, existing meds, etc.)."""
+    profile = db.query(PatientProfile).filter(PatientProfile.user_id == user_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Patient profile not found")
+    
+    name = (data.get("medicine_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Medicine name is required")
+    if len(name) > 255:
+        raise HTTPException(status_code=400, detail="Medicine name is too long")
+    
+    reminder = MedicationReminder(
+        patient_id=profile.id,
+        medicine_name=name,
+        dosage=(data.get("dosage") or "").strip() or None,
+        frequency=(data.get("frequency") or "").strip() or None,
+        time_of_day=(data.get("time_of_day") or "").strip() or None,
+        instructions=(data.get("instructions") or "").strip() or None,
+        source="patient",
+        added_by=user_id,
+    )
+    db.add(reminder)
+    db.commit()
+    db.refresh(reminder)
+    
+    return {"id": reminder.id, "message": "Medication added", "medication": _med_dict(reminder)}
+
+
+@router.delete("/medications/{reminder_id}", status_code=200)
+def remove_medication(
+    reminder_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Patient deactivates one of their own medication reminders (soft delete
+    so historical logs stay intact). Doctor-sourced meds can be removed too —
+    the prescription record itself is never touched."""
+    profile = db.query(PatientProfile).filter(PatientProfile.user_id == user_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Patient profile not found")
+    
+    reminder = db.query(MedicationReminder).filter(
+        MedicationReminder.id == reminder_id,
+        MedicationReminder.patient_id == profile.id,
+    ).first()
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Medication not found")
+    
+    reminder.is_active = False
+    db.commit()
+    return {"message": "Medication removed", "id": reminder_id}
 
 
 @router.post("/medications/{reminder_id}/taken")
@@ -345,8 +422,9 @@ def list_appointments(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """List appointments."""
+    """List appointments for the current patient, with doctor names."""
     from app.models.health import Appointment
+    from app.models.user import User
     
     profile = db.query(PatientProfile).filter(PatientProfile.user_id == user_id).first()
     if not profile:
@@ -356,7 +434,26 @@ def list_appointments(
         Appointment.patient_id == profile.id
     ).order_by(Appointment.appointment_date.desc()).all()
     
-    return {"appointments": appointments}
+    result = []
+    for a in appointments:
+        doctor_name = None
+        if a.doctor_id:
+            doctor = db.query(User).filter(User.id == a.doctor_id).first()
+            doctor_name = doctor.full_name if doctor else None
+        result.append({
+            "id": a.id,
+            "appointment_date": str(a.appointment_date) if a.appointment_date else None,
+            "reason": a.reason,
+            "notes": a.notes,
+            "status": a.status,
+            "is_follow_up": a.is_follow_up,
+            "doctor_id": a.doctor_id,
+            "doctor_name": doctor_name,
+            "facility_id": a.facility_id,
+            "created_at": str(a.created_at) if a.created_at else None,
+        })
+    
+    return {"appointments": result}
 
 
 @router.post("/appointments", status_code=201)

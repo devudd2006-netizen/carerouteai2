@@ -114,15 +114,15 @@ export function PatientDashboard() {
       {/* Quick Actions */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {[
-          { to: '/patient/checkin', icon: Activity, label: 'Health Check', color: 'primary' },
-          { to: '/patient/health-memory', icon: Heart, label: 'Health Memory', color: 'red' },
-          { to: '/patient/care-route', icon: MapPin, label: 'Find Care', color: 'healthcare' },
-          { to: '/patient/medications', icon: Pill, label: 'My Medicines', color: 'purple' },
-          { to: '/patient/documents', icon: FileText, label: 'Upload Report', color: 'blue' },
-          { to: '/patient/emergency', icon: AlertTriangle, label: 'Emergency', color: 'danger' },
-        ].map(({ to, icon: Icon, label, color }) => (
-          <Link key={to} to={to} className={`card hover:shadow-md transition-all text-center py-4 border-${color}-100 hover:border-${color}-300`}>
-            <Icon className={`mx-auto mb-2 text-${color}-500`} size={24} />
+          { to: '/patient/checkin', icon: Activity, label: 'Health Check', iconClass: 'text-primary-500', borderClass: 'border-primary-100 hover:border-primary-300' },
+          { to: '/patient/health-memory', icon: Heart, label: 'Health Memory', iconClass: 'text-red-500', borderClass: 'border-red-100 hover:border-red-300' },
+          { to: '/patient/care-route', icon: MapPin, label: 'Find Care', iconClass: 'text-healthcare-500', borderClass: 'border-healthcare-100 hover:border-healthcare-300' },
+          { to: '/patient/medications', icon: Pill, label: 'My Medicines', iconClass: 'text-purple-500', borderClass: 'border-purple-100 hover:border-purple-300' },
+          { to: '/patient/documents', icon: FileText, label: 'Upload Report', iconClass: 'text-blue-500', borderClass: 'border-blue-100 hover:border-blue-300' },
+          { to: '/patient/emergency', icon: AlertTriangle, label: 'Emergency', iconClass: 'text-red-600', borderClass: 'border-danger-100 hover:border-danger-300' },
+        ].map(({ to, icon: Icon, label, iconClass, borderClass }) => (
+          <Link key={to} to={to} className={`card hover:shadow-md transition-all text-center py-4 ${borderClass}`}>
+            <Icon className={`mx-auto mb-2 ${iconClass}`} size={24} />
             <span className="text-sm font-medium text-gray-700">{label}</span>
           </Link>
         ))}

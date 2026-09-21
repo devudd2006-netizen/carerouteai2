@@ -178,7 +178,16 @@ def get_health_timeline(
         HealthAssessment.patient_id == profile.id
     ).order_by(desc(HealthAssessment.created_at)).limit(20).all()
     
+    # Doctor names for assessments with a doctor attached (consultations)
+    from app.models.user import User
+    doctor_ids = {a.doctor_id for a in assessments if a.doctor_id}
+    doctor_names = {
+        d.id: d.full_name
+        for d in db.query(User).filter(User.id.in_(doctor_ids)).all()
+    } if doctor_ids else {}
+    
     for a in assessments:
+        has_doctor_notes = bool(a.doctor_notes or a.diagnosis)
         entry = {
             "type": "assessment",
             "date": str(a.created_at) if a.created_at else None,
@@ -188,6 +197,9 @@ def get_health_timeline(
                 "possible_concerns": a.possible_concerns,
                 "recommended_action": a.recommended_action,
                 "diagnosis": a.diagnosis,
+                "doctor_notes": a.doctor_notes,
+                "doctor_name": doctor_names.get(a.doctor_id),
+                "is_doctor_consultation": has_doctor_notes,
             }
         }
         timeline.append(entry)
@@ -196,6 +208,60 @@ def get_health_timeline(
     timeline.sort(key=lambda x: x["date"] or "", reverse=True)
     
     return {"timeline": timeline, "count": len(timeline)}
+
+
+@router.get("/trends")
+def get_health_trends(
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Get aggregated health trends from recent check-ins.
+
+    Returns per-check-in series (oldest first) for charting, plus totals of the
+    most common symptoms. Aggregated from the patient's own data only.
+    """
+    profile = _get_patient_profile(user_id, db)
+
+    checkins = db.query(HealthCheckin).filter(
+        HealthCheckin.patient_id == profile.id
+    ).order_by(HealthCheckin.created_at).limit(30).all()
+
+    series = []
+    symptom_counts: dict = {}
+    for c in checkins:
+        symptoms = c.symptoms or []
+        for s in symptoms:
+            symptom_counts[s] = symptom_counts.get(s, 0) + 1
+        series.append({
+            "date": str(c.created_at.date()) if c.created_at else None,
+            "feeling_today": c.feeling_today,
+            "risk_level": c.ai_risk_level or "low",
+            "symptom_count": len(symptoms),
+            "sleep_quality": c.sleep_quality,
+            "stress_level": c.stress_level,
+            "pain_severity": c.pain_severity,
+        })
+
+    top_symptoms = [
+        {"symptom": s, "count": n}
+        for s, n in sorted(symptom_counts.items(), key=lambda kv: kv[1], reverse=True)[:8]
+    ]
+
+    feeling_counts: dict = {}
+    risk_counts: dict = {"low": 0, "moderate": 0, "high": 0, "emergency": 0}
+    for c in checkins:
+        if c.feeling_today:
+            feeling_counts[c.feeling_today] = feeling_counts.get(c.feeling_today, 0) + 1
+        risk = c.ai_risk_level or "low"
+        risk_counts[risk] = risk_counts.get(risk, 0) + 1
+
+    return {
+        "series": series,
+        "top_symptoms": top_symptoms,
+        "feeling_counts": feeling_counts,
+        "risk_counts": risk_counts,
+        "total_checkins": len(checkins),
+    }
 
 
 @router.get("/assessments", response_model=list[HealthAssessmentResponse])

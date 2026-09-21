@@ -53,3 +53,24 @@ def init_db():
     from app.models import user, patient, health, document  # noqa
     from app.models import facility, community, emergency  # noqa
     Base.metadata.create_all(bind=engine)
+
+
+def run_light_migrations():
+    """Additive column migrations for dev databases created before new columns
+    existed. CREATE TABLE won't alter existing tables, so use direct ALTERs and
+    swallow the 'duplicate column' error on fresh databases. Test databases are
+    always fresh so this is only exercised by long-lived dev databases."""
+    from sqlalchemy import text
+    migrations = [
+        ("medication_reminders", "source", "VARCHAR(20) DEFAULT 'doctor' NOT NULL"),
+        ("medication_reminders", "added_by", "INTEGER"),
+        ("medication_reminders", "instructions", "TEXT"),
+    ]
+    with engine.connect() as conn:
+        for table, column, ddl in migrations:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+                conn.commit()
+            except Exception:
+                # Column already exists (fresh DB or previously migrated)
+                pass

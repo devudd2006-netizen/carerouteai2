@@ -1,5 +1,7 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
+import { api } from '../services/api';
+import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { AlertBadge } from '../components/common/AlertBadge';
 import {
   ArrowLeft, AlertTriangle, Info, MapPin, Phone,
@@ -9,12 +11,44 @@ import {
 export function ScreeningResultPage() {
   const { id } = useParams();
   const location = useLocation();
-  const screening = (location.state as any)?.screening;
+  const [fetched, setFetched] = useState<any>(null);
+  const [fetchState, setFetchState] = useState<'loading' | 'ready' | 'failed'>('ready');
+  const passedScreening = (location.state as any)?.screening;
+
+  // Direct visits (refresh / bookmark / shared link) have no navigation state —
+  // recover the stored assessment from the API instead of dead-ending.
+  useEffect(() => {
+    if (passedScreening || !id) return;
+    setFetchState('loading');
+    api.getCheckin(parseInt(id))
+      .then(d => {
+        const a = d.assessment;
+        setFetched(a ? {
+          urgency_level: a.urgency_level,
+          possible_concerns: a.possible_concerns,
+          reasons: a.reasons,
+          recommended_action: a.recommended_action,
+          warning_signs: a.warning_signs,
+          care_route: a.care_route,
+          red_flags_detected: a.urgency_level === 'emergency',
+        } : null);
+        setFetchState('ready');
+      })
+      .catch(() => setFetchState('failed'));
+  }, [id, passedScreening]);
+
+  const screening = passedScreening || fetched;
+
+  if (!passedScreening && fetchState === 'loading') {
+    return <LoadingSpinner message="Loading your screening result..." />;
+  }
 
   if (!screening) {
     return (
       <div className="max-w-2xl mx-auto text-center py-12">
-        <h2 className="text-xl font-bold text-gray-900 mb-4">No Screening Data</h2>
+        <h2 className="text-xl font-bold text-gray-900 mb-4">
+          {fetchState === 'failed' ? 'Unable to load screening' : 'No Screening Data'}
+        </h2>
         <p className="text-gray-500 mb-4">Please complete a health check-in first.</p>
         <Link to="/patient/checkin" className="btn-primary">Start Health Check</Link>
       </div>

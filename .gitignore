@@ -49,3 +49,5 @@ vite-preview.log
 # OS
 .DS_Store
 Thumbs.db
+
+backend.zip

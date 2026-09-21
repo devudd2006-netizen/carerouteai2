@@ -75,6 +75,7 @@ class ApiService {
   async getCheckins() { return this.request('/api/health/checkins'); }
   async getCheckin(id: number) { return this.request(`/api/health/checkins/${id}`); }
   async getTimeline() { return this.request('/api/health/timeline'); }
+  async getTrends() { return this.request('/api/health/trends'); }
   async getAssessments() { return this.request('/api/health/assessments'); }
   async screenSymptoms(data: any) { return this.request('/api/health/screen', { method: 'POST', body: data }); }
   async getCareRoute(data: any) { return this.request('/api/health/care-route', { method: 'POST', body: data }); }
@@ -100,6 +101,8 @@ class ApiService {
   async getCarePlans() { return this.request('/api/care-plans'); }
   async createCarePlan(data: any) { return this.request('/api/care-plans', { method: 'POST', body: data }); }
   async getMedications() { return this.request('/api/medications'); }
+  async addMedication(data: any) { return this.request('/api/medications', { method: 'POST', body: data }); }
+  async removeMedication(id: number) { return this.request(`/api/medications/${id}`, { method: 'DELETE' }); }
   async logMedication(id: number, data: any) { return this.request(`/api/medications/${id}/taken`, { method: 'POST', body: data }); }
   async getAppointments() { return this.request('/api/appointments'); }
   async createAppointment(data: any) { return this.request('/api/appointments', { method: 'POST', body: data }); }
@@ -108,6 +111,10 @@ class ApiService {
   async getFacilities(params?: string) { return this.request(`/api/facilities/${params ? `?${params}` : ''}`); }
   async getNearbyFacilities(lat: number, lon: number, radius?: number) {
     return this.request(`/api/facilities/nearby?latitude=${lat}&longitude=${lon}&radius_km=${radius || 25}`);
+  }
+  async getBestHospitals(lat?: number, lon?: number, radius?: number) {
+    const q = lat != null && lon != null ? `?latitude=${lat}&longitude=${lon}${radius ? `&radius_km=${radius}` : ''}` : '';
+    return this.request(`/api/facilities/best${q}`);
   }
   async getFacility(id: number) { return this.request(`/api/facilities/${id}`); }
 
@@ -122,6 +129,9 @@ class ApiService {
   async addConsultation(data: any) { return this.request('/api/doctor/consultations', { method: 'POST', body: data }); }
   async createDoctorPrescription(data: any) { return this.request('/api/doctor/prescriptions', { method: 'POST', body: data }); }
   async createFollowup(data: any) { return this.request('/api/doctor/followups', { method: 'POST', body: data }); }
+  async getDoctorAppointments() { return this.request('/api/doctor/appointments'); }
+  async createDoctorAppointment(data: any) { return this.request('/api/doctor/appointments', { method: 'POST', body: data }); }
+  async updateDoctorAppointment(id: number, data: any) { return this.request(`/api/doctor/appointments/${id}`, { method: 'PATCH', body: data }); }
 
   // Community
   async getCommunityOverview() { return this.request('/api/community/overview'); }

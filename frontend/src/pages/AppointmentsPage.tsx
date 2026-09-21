@@ -2,7 +2,13 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../services/api';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { EmptyState } from '../components/common/EmptyState';
-import { Calendar, Clock, CheckCircle2, XCircle, AlertCircle } from 'lucide-react';
+import { Calendar, Clock, CheckCircle2, XCircle, AlertCircle, User } from 'lucide-react';
+
+function formatApptDate(value?: string | null): string {
+  if (!value) return '';
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? value : d.toLocaleString();
+}
 
 export function AppointmentsPage() {
   const [appointments, setAppointments] = useState<any[]>([]);
@@ -21,7 +27,7 @@ export function AppointmentsPage() {
   if (loading) return <LoadingSpinner message="Loading appointments..." />;
 
   const upcoming = appointments.filter(a => a.status === 'scheduled');
-  const completed = appointments.filter(a => a.status === 'completed');
+  const past = appointments.filter(a => a.status !== 'scheduled');
 
   const statusIcon = (status: string) => {
     switch (status) {
@@ -39,7 +45,10 @@ export function AppointmentsPage() {
       </h2>
 
       {appointments.length === 0 ? (
-        <EmptyState title="No appointments" description="No appointments scheduled yet." />
+        <EmptyState
+          title="No appointments"
+          description="No appointments scheduled yet. Your doctor can schedule one for you, or check back after your next consultation."
+        />
       ) : (
         <>
           {/* Upcoming */}
@@ -54,7 +63,10 @@ export function AppointmentsPage() {
                     {statusIcon(a.status)}
                     <div className="flex-1">
                       <p className="font-medium text-gray-900">{a.reason || 'Appointment'}</p>
-                      <p className="text-sm text-gray-600">{new Date(a.appointment_date).toLocaleString()}</p>
+                      <p className="text-sm text-gray-600">{formatApptDate(a.appointment_date)}</p>
+                      <p className="text-xs text-gray-500 flex items-center gap-1 mt-1">
+                        <User size={12} /> {a.doctor_name || 'Doctor TBD'}
+                      </p>
                       {a.is_follow_up && <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">Follow-up</span>}
                     </div>
                     <span className="text-xs text-blue-600 font-medium capitalize">{a.status}</span>
@@ -64,19 +76,22 @@ export function AppointmentsPage() {
             )}
           </div>
 
-          {/* Completed */}
-          {completed.length > 0 && (
+          {/* Past */}
+          {past.length > 0 && (
             <div>
-              <h3 className="font-semibold text-gray-900 mb-3">Completed</h3>
+              <h3 className="font-semibold text-gray-900 mb-3">Past</h3>
               <div className="space-y-3">
-                {completed.map(a => (
+                {past.map(a => (
                   <div key={a.id} className="card flex items-center gap-4 opacity-75">
                     {statusIcon(a.status)}
                     <div className="flex-1">
                       <p className="font-medium text-gray-900">{a.reason || 'Appointment'}</p>
-                      <p className="text-sm text-gray-600">{new Date(a.appointment_date).toLocaleString()}</p>
+                      <p className="text-sm text-gray-600">{formatApptDate(a.appointment_date)}</p>
+                      <p className="text-xs text-gray-500 flex items-center gap-1 mt-1">
+                        <User size={12} /> {a.doctor_name || 'Doctor TBD'}
+                      </p>
                     </div>
-                    <span className="text-xs text-green-600 font-medium">Completed</span>
+                    <span className={`text-xs font-medium capitalize ${a.status === 'completed' ? 'text-green-600' : 'text-gray-500'}`}>{a.status}</span>
                   </div>
                 ))}
               </div>
