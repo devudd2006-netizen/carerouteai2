@@ -708,3 +708,69 @@ class TestFacilitiesAPI:
 
     def test_best_hospitals_requires_auth(self, client):
         assert client.get("/api/facilities/best").status_code in (401, 403)
+
+    def test_best_hospitals_merges_live_facilities(self, client):
+        """POST /best with live-sensed hospitals ranks them together with the
+        seeded catalogue — a close live hospital outranks a distant seeded one,
+        and name collisions keep the catalogue record."""
+        self._seed_hospitals(db_session_factory())
+        token = _register_and_login(client, "best4@test.com")
+        # A live-sensed hospital right next to the caller (100 m) and a live
+        # duplicate of a seeded name (must be deduped away).
+        live = [
+            {
+                "id": 100001, "name": "Live Corner Hospital",
+                "facility_type": "hospital",
+                "latitude": 9.9260, "longitude": 78.1200,
+                "address": "Live Street", "services": ["general"],
+                "emergency_available": True, "opening_hours": "24/7",
+                "contact_number": None, "distance_km": 0.1,
+            },
+            {
+                "id": 100002, "name": "Mega General Hospital",
+                "facility_type": "hospital",
+                "latitude": 9.9260, "longitude": 78.1200,
+                "services": [], "emergency_available": False,
+            },
+        ]
+        resp = client.post(
+            "/api/facilities/best",
+            json={"latitude": 9.9252, "longitude": 78.1198, "live_facilities": live},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        names = [f["name"] for f in data["nearby_best"]]
+        assert "Live Corner Hospital" in names, names
+        # Catalogue wins the name collision: exactly one "Mega General Hospital"
+        assert names.count("Mega General Hospital") == 1
+        # Proximity-first holds with the merged set: nothing beyond the radius,
+        # and the nearest 1-km band leads. Within a band, capability may order
+        # entries (the “best in your km” rule).
+        dists = [f["distance_km"] for f in data["nearby_best"]]
+        assert all(d <= 15 for d in dists), dists
+        bands = [int(d) for d in dists]
+        assert bands == sorted(bands), f"not band-sorted: {dists}"
+        assert bands[0] == 0, f"closest band should lead, got {dists[0]}"
+
+    def test_best_hospitals_live_ignores_non_hospitals(self, client):
+        """Live pharmacies/clinics sent to POST /best are not ranked as hospitals."""
+        self._seed_hospitals(db_session_factory())
+        token = _register_and_login(client, "best5@test.com")
+        live = [{
+            "id": 100003, "name": "Live Pharmacy", "facility_type": "pharmacy",
+            "latitude": 9.9253, "longitude": 78.1199,
+        }]
+        resp = client.post(
+            "/api/facilities/best",
+            json={"latitude": 9.9252, "longitude": 78.1198, "live_facilities": live},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200, resp.text
+        names = [f["name"] for f in resp.json()["nearby_best"]]
+        assert "Live Pharmacy" not in names
+
+    def test_best_hospitals_live_requires_auth(self, client):
+        assert client.post("/api/facilities/best", json={
+            "latitude": 9.92, "longitude": 78.11, "live_facilities": [],
+        }).status_code in (401, 403)

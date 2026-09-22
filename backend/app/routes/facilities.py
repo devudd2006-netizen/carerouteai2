@@ -2,8 +2,10 @@
 Healthcare facility routes for the map and care routing.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from typing import Optional
+from types import SimpleNamespace
+from typing import Optional, List
 
 from app.db.database import get_db
 from app.models.facility import HealthcareFacility
@@ -69,6 +71,28 @@ def list_facilities(
     return {"facilities": result, "count": len(result)}
 
 
+class LiveFacility(BaseModel):
+    """A healthcare place sensed live (e.g. from OpenStreetMap Overpass)."""
+    id: int
+    name: str
+    facility_type: str = "hospital"
+    latitude: float
+    longitude: float
+    address: Optional[str] = None
+    services: List[str] = Field(default_factory=list)
+    emergency_available: bool = False
+    opening_hours: Optional[str] = None
+    contact_number: Optional[str] = None
+    distance_km: Optional[float] = None
+
+
+class BestRequest(BaseModel):
+    latitude: float
+    longitude: float
+    radius_km: float = 15
+    live_facilities: List[LiveFacility] = Field(default_factory=list)
+
+
 @router.get("/best")
 def best_hospitals(
     latitude: Optional[float] = Query(None),
@@ -77,21 +101,66 @@ def best_hospitals(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """Best hospitals in two views:
+    return _rank_best(db, latitude, longitude, radius_km)
 
-    - nearby_best: hospitals within radius_km of the caller, ranked
-      proximity-first — closer hospitals win, capability only breaks ties among
-      peers that are near each other. "Nearby" must never surface hospitals
-      10+ km away while closer ones exist.
-    - overall_best: the highest-capability hospitals overall (any distance),
-      so the caller always sees the region's top institutions.
 
-    Without coordinates, only overall_best is populated (nearby is unknown).
+@router.post("/best")
+def best_hospitals_live(
+    payload: BestRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Same ranking as GET /best, with live-sensed facilities merged in.
+
+    The frontend senses real healthcare places around the user (OpenStreetMap
+    Overpass) and posts them here; catalogue records keep priority on name
+    collisions. Live clinics/pharmacies are ignored — this ranks hospitals.
     """
-    hospitals = db.query(HealthcareFacility).filter(
-        HealthcareFacility.is_active == True,  # noqa: E712
-        HealthcareFacility.facility_type.in_(["hospital", "emergency"]),
-    ).all()
+    return _rank_best(
+        db, payload.latitude, payload.longitude, payload.radius_km,
+        [lf.model_dump() for lf in payload.live_facilities],
+    )
+
+
+def _rank_best(
+    db: Session,
+    latitude: Optional[float],
+    longitude: Optional[float],
+    radius_km: float,
+    live_facilities: Optional[List[dict]] = None,
+) -> dict:
+    """Shared ranking used by GET /best (catalogue only) and POST /best
+    (catalogue merged with live-sensed facilities)."""
+    hospitals = list(
+        db.query(HealthcareFacility).filter(
+            HealthcareFacility.is_active == True,  # noqa: E712
+            HealthcareFacility.facility_type.in_(["hospital", "emergency"]),
+        ).all()
+    )
+
+    # Fold live-sensed hospitals into the ranking. The curated catalogue wins
+    # on name collisions; live entries get catalogue-compatible attributes.
+    for lf in live_facilities or []:
+        if (lf.get("facility_type") or "") not in ("hospital", "emergency"):
+            continue
+        lname = (lf.get("name") or "").strip().lower()
+        if not lname or any(h.name.strip().lower() == lname for h in hospitals):
+            continue
+        hospitals.append(SimpleNamespace(
+            id=lf["id"],
+            name=lf["name"],
+            facility_type=lf.get("facility_type") or "hospital",
+            latitude=lf["latitude"],
+            longitude=lf["longitude"],
+            address=lf.get("address"),
+            village=None,
+            district=None,
+            services=lf.get("services") or [],
+            emergency_available=bool(lf.get("emergency_available")),
+            opening_hours=lf.get("opening_hours"),
+            contact_number=lf.get("contact_number"),
+            accessibility_info=None,
+        ))
 
     def capability(h: HealthcareFacility) -> float:
         services = h.services or []
@@ -128,9 +197,9 @@ def best_hospitals(
 
     # Nearby best: proximity-first within the radius.
     nearby_best = []
+    used_fallback = False
     if latitude is not None and longitude is not None:
         nearby_scored = [s for s in scored if s[2] is not None and s[2] <= radius_km]
-        used_fallback = False
         if not nearby_scored:
             # Nothing within the radius: take the closest hospitals anywhere and
             # flag it so the UI can say "nearest hospitals" honestly.

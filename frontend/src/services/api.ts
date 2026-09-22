@@ -9,6 +9,7 @@ interface ApiOptions {
   method?: string;
   body?: any;
   headers?: Record<string, string>;
+  timeoutMs?: number;
 }
 
 class ApiService {
@@ -17,11 +18,16 @@ class ApiService {
   }
 
   async request<T = any>(endpoint: string, options: ApiOptions = {}): Promise<T> {
-    const { method = 'GET', body, headers = {} } = options;
-    
+    const { method = 'GET', body, headers = {}, timeoutMs = 20000 } = options;
+
     const token = this.getToken();
+    // Requests must never hang forever — a stalled backend should surface as
+    // a retryable error instead of an eternal spinner.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const config: RequestInit = {
       method,
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -51,10 +57,15 @@ class ApiService {
 
       return data;
     } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        throw new Error('The server took too long to respond. Please try again.');
+      }
       if (error.message === 'Failed to fetch') {
         throw new Error('Unable to connect to server. Please check if the backend is running.');
       }
       throw error;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -115,6 +126,14 @@ class ApiService {
   async getBestHospitals(lat?: number, lon?: number, radius?: number) {
     const q = lat != null && lon != null ? `?latitude=${lat}&longitude=${lon}${radius ? `&radius_km=${radius}` : ''}` : '';
     return this.request(`/api/facilities/best${q}`);
+  }
+  /** Ranking with live-sensed facilities (OpenStreetMap) merged in. */
+  async getBestHospitalsLive(lat: number, lon: number, liveFacilities: any[], radius?: number) {
+    return this.request('/api/facilities/best', {
+      method: 'POST',
+      body: { latitude: lat, longitude: lon, radius_km: radius || 15, live_facilities: liveFacilities },
+      timeoutMs: 30000,
+    });
   }
   async getFacility(id: number) { return this.request(`/api/facilities/${id}`); }
 

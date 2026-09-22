@@ -93,6 +93,11 @@ export function CareRoutePage() {
   const [bestMeta, setBestMeta] = useState<{ used_fallback: boolean; radius_km: number } | null>(null);
   const [picking, setPicking] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [liveSearching, setLiveSearching] = useState(false);
+  const [liveFacilities, setLiveFacilities] = useState<Facility[]>([]);
+  const [liveNote, setLiveNote] = useState<string | null>(null);
+  const [offlineMode, setOfflineMode] = useState(false);
   const [filter, setFilter] = useState('hospital');
   const [searchQuery, setSearchQuery] = useState('');
   const [selected, setSelected] = useState<Facility | null>(null);
@@ -107,55 +112,186 @@ export function CareRoutePage() {
   const markersRef = useRef<L.LayerGroup | null>(null);
   const routeLayerRef = useRef<L.LayerGroup | null>(null);
   const youMarkerRef = useRef<L.CircleMarker | null>(null);
+  // Mirror for async callbacks that must see the latest merged live list.
+  const liveFacilitiesRef = useRef<Facility[]>([]);
+  useEffect(() => {
+    liveFacilitiesRef.current = liveFacilities;
+    // Fold newly sensed places into the visible list without a refetch.
+    if (liveFacilities.length > 0) {
+      setAllFacilities((prev) => mergeLive(liveFacilities, prev));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveFacilities]);
+  // Latest bestMeta for the localStorage cache writer.
+  const bestMetaRef = useRef<{ used_fallback: boolean; radius_km: number } | null>(null);
+  useEffect(() => { bestMetaRef.current = bestMeta; }, [bestMeta]);
 
   // ---------------- data loading ----------------
 
+  /**
+   * Sense hospitals that actually exist around the user right now using the
+   * OpenStreetMap Overpass API (no API key needed). Results are merged with
+   * the seeded catalogue so local records win over live duplicates.
+   */
+  const overpassNearby = async (pos: { lat: number; lon: number }): Promise<Facility[]> => {
+    const q = `[out:json][timeout:20];(
+      node["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:8000,${pos.lat},${pos.lon});
+      way["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:8000,${pos.lat},${pos.lon});
+    );out center tags 60;`;
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `data=${encodeURIComponent(q)}`,
+    });
+    if (!res.ok) throw new Error('Overpass unavailable');
+    const json = await res.json();
+    const typeMap: Record<string, string> = {
+      hospital: 'hospital', clinic: 'clinic', doctors: 'clinic', pharmacy: 'pharmacy',
+    };
+    const seen = new Set<string>();
+    const out: Facility[] = [];
+    for (const el of json.elements || []) {
+      const tags = el.tags || {};
+      const name = tags.name;
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      const lat = el.lat ?? el.center?.lat;
+      const lon = el.lon ?? el.center?.lon;
+      if (lat == null || lon == null) continue;
+      const ftype = typeMap[tags.amenity] || 'clinic';
+      const emergency =
+        tags.emergency === 'yes' || /24\s*\/\s*7|24x7/i.test(tags.opening_hours || '');
+      out.push({
+        id: 100000 + (el.id % 900000), // synthetic id — never collides with seeds
+        name,
+        facility_type: ftype,
+        latitude: lat,
+        longitude: lon,
+        address: [tags['addr:street'], tags['addr:city']].filter(Boolean).join(', ') || null,
+        services: Object.keys(tags).filter((t) => t.startsWith('healthcare:')).map((t) => t.replace('healthcare:', '').replace(/_/g, ' ')),
+        emergency_available: emergency,
+        opening_hours: tags.opening_hours || null,
+        contact_number: tags.phone || tags['contact:phone'] || null,
+        distance_km: straightLineKm(pos, { latitude: lat, longitude: lon }),
+      });
+    }
+    return out;
+  };
+
+  const mergeLive = (live: Facility[], base: Facility[]): Facility[] => {
+    const names = new Set(base.map((f) => f.name.toLowerCase()));
+    return [...base, ...live.filter((f) => !names.has(f.name.toLowerCase()))];
+  };
+
+  // Last-ranked hospital list survives reloads and offline starts.
+  const BEST_CACHE_KEY = 'cr_last_best';
+  const saveBestCache = (best: any) => {
+    try {
+      localStorage.setItem(BEST_CACHE_KEY, JSON.stringify({
+        nearby_best: best.nearby_best || [],
+        overall_best: best.overall_best || [],
+        meta: bestMetaRef.current,
+      }));
+    } catch { /* storage full/blocked — non-fatal */ }
+  };
+  const readBestCache = (): any | null => {
+    try {
+      const raw = localStorage.getItem(BEST_CACHE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  };
+
   const loadFacilities = async (pos?: { lat: number; lon: number } | null) => {
     setLoading(true);
+    setLoadError(null);
     try {
       const data = await api.getFacilities();
-      const list: Facility[] = data.facilities || [];
-      setAllFacilities(list);
+      let list: Facility[] = data.facilities || [];
+      // The service worker flags cached responses served while offline.
+      setOfflineMode(!!(data as any)?.__offline);
 
       // Best-hospitals ranking needs the caller's coordinates when available.
       if (pos) {
-        const best = await api.getBestHospitals(pos.lat, pos.lon);
-        setNearbyBest(best.nearby_best || []);
-        setOverallBest(best.overall_best || []);
-        setBestMeta({ used_fallback: !!best.used_fallback, radius_km: best.radius_km || 15 });
+        // Live sensing runs in parallel with the ranked catalogue request.
+        setLiveSearching(true);
+        const bestP = api
+          .getBestHospitals(pos.lat, pos.lon)
+          .then((best: any) => {
+            setNearbyBest(best.nearby_best || []);
+            setOverallBest(best.overall_best || []);
+            setBestMeta({ used_fallback: !!best.used_fallback, radius_km: best.radius_km || 15 });
+            saveBestCache(best);
+          })
+          .catch(() => {
+            // Offline (or backend down): fall back to the last-ranked list.
+            const cached = readBestCache();
+            if (cached) {
+              setNearbyBest(cached.nearby_best || []);
+              setOverallBest(cached.overall_best || []);
+              setBestMeta(cached.meta || null);
+            }
+          });
+        const liveP = overpassNearby(pos)
+          .then((live) => {
+            setLiveFacilities(live);
+            if (live.length > 0) {
+              setLiveNote(`${live.length} more healthcare places sensed live around you (OpenStreetMap) — merged into the ranking, list and map.`);
+            }
+            return live;
+          })
+          .catch(() => [] as Facility[])
+          .finally(() => setLiveSearching(false));
+        const [, live] = await Promise.allSettled([bestP, liveP]).then((rs) =>
+          rs.map((r) => (r.status === 'fulfilled' ? r.value : []))
+        );
+        // Re-rank with live-sensed hospitals included so they compete with
+        // the curated catalogue in “Best Hospitals Near You”.
+        const liveHospitals = (live as Facility[]).filter((f) => f.facility_type === 'hospital');
+        if (liveHospitals.length > 0) {
+          try {
+            const merged = await api.getBestHospitalsLive(pos.lat, pos.lon, liveHospitals);
+            setNearbyBest(merged.nearby_best || []);
+            setOverallBest(merged.overall_best || []);
+            setBestMeta({ used_fallback: !!merged.used_fallback, radius_km: merged.radius_km || 15 });
+            saveBestCache(merged);
+          } catch { /* catalogue-only ranking already shown */ }
+        }
       } else {
         const best = await api.getBestHospitals();
         setNearbyBest([]);
         setOverallBest(best.overall_best || []);
         setBestMeta(null);
       }
-    } catch (e) {
+      setAllFacilities((prev) => mergeLive(liveFacilitiesRef.current, list));
+    } catch (e: any) {
       console.error(e);
+      setLoadError(e?.message || 'Could not load facilities.');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    // Start with the profile's saved location (instant), then try the device
-    // GPS for a precise fix. Whichever resolves updates the ranking.
+    let cancelled = false;
+    // All three start concurrently — the map and catalogue must never wait on
+    // the profile request, and profile failure must not block anything.
+    loadFacilities(null);
     api.getProfile()
       .then((p) => {
+        if (cancelled) return;
         if (p?.latitude != null && p?.longitude != null) {
           const pos = { lat: p.latitude, lon: p.longitude };
           setUserPos(pos);
-          return pos;
+          loadFacilities(pos);
         }
-        return null;
       })
-      .then((pos) => {
-        loadFacilities(pos);
-        requestBrowserLocation(false);
-      })
-      .catch(() => {
-        loadFacilities(null);
-        requestBrowserLocation(false);
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) requestBrowserLocation(false);
       });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -166,40 +302,65 @@ export function CareRoutePage() {
     }
     setLocating(true);
     setLocationNote(null);
+
+    // Watchdog: if the browser never resolves the permission prompt (common
+    // in embedded browsers), neither geolocation callback fires and the
+    // button would stay stuck on “Sensing…” forever.
+    let settled = false;
+    const watchdog = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      setLocating(false);
+      setLocationNote('Location sensing timed out — using your saved location. Tap “Set on map” to adjust.');
+    }, 12000);
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      fn();
+    };
+
     const opts: PositionOptions = { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 };
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const pos = {
-          lat: position.coords.latitude,
-          lon: position.coords.longitude,
-        };
-        setUserPos(pos);
-        setLocSource('gps');
-        setLocating(false);
-        setLocationNote(`Using your precise GPS location (±${Math.round(position.coords.accuracy)} m).`);
-        loadFacilities(pos);
-        mapRef.current?.setView([pos.lat, pos.lon], 14);
+        finish(() => {
+          const pos = {
+            lat: position.coords.latitude,
+            lon: position.coords.longitude,
+          };
+          setUserPos(pos);
+          setLocSource('gps');
+          setLocating(false);
+          setLocationNote(`Using your precise GPS location (±${Math.round(position.coords.accuracy)} m).`);
+          loadFacilities(pos);
+          mapRef.current?.setView([pos.lat, pos.lon], 14);
+        });
       },
       (firstErr) => {
         // High-accuracy fixes often fail indoors or on desktops — retry once
         // with low accuracy before giving up.
         navigator.geolocation.getCurrentPosition(
           (position) => {
-            const pos = { lat: position.coords.latitude, lon: position.coords.longitude };
-            setUserPos(pos);
-            setLocSource('gps');
-            setLocating(false);
-            setLocationNote(`Using your approximate GPS location (±${Math.round(position.coords.accuracy)} m).`);
-            loadFacilities(pos);
-            mapRef.current?.setView([pos.lat, pos.lon], 12);
+            finish(() => {
+              const pos = { lat: position.coords.latitude, lon: position.coords.longitude };
+              setUserPos(pos);
+              setLocSource('gps');
+              setLocating(false);
+              setLocationNote(`Using your approximate GPS location (±${Math.round(position.coords.accuracy)} m).`);
+              loadFacilities(pos);
+              mapRef.current?.setView([pos.lat, pos.lon], 12);
+            });
           },
           () => {
-            setLocating(false);
-            setLocationNote(
-              firstErr.code === firstErr.PERMISSION_DENIED
-                ? 'Location permission denied — using your saved home location. Tap “Set on map” to fine-tune it.'
-                : 'Could not sense your location — using your saved home location. Tap “Set on map” to correct it.'
-            );
+            finish(() => {
+              setLocating(false);
+              setLocationNote(
+                firstErr.code === firstErr.PERMISSION_DENIED
+                  ? 'Location permission denied — using your saved home location. Tap “Set on map” to fine-tune it.'
+                  : 'Could not sense your location — using your saved home location. Tap “Set on map” to correct it.'
+              );
+            });
           },
           { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 }
         );
@@ -211,7 +372,9 @@ export function CareRoutePage() {
   // ---------------- map ----------------
 
   useEffect(() => {
-    if (loading || allFacilities.length === 0 || mapReady || !mapDivRef.current) return;
+    // Initialize as soon as the catalogue attempt finishes — an empty result
+    // must still produce a map, never a stuck “Preparing…” overlay.
+    if (loading || mapReady || !mapDivRef.current) return;
     try {
       const map = L.map(mapDivRef.current).setView(
         userPos ? [userPos.lat, userPos.lon] : [MADURAI.lat, MADURAI.lon],
@@ -229,7 +392,7 @@ export function CareRoutePage() {
       console.error('Map init failed:', e);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, allFacilities]);
+  }, [loading]);
 
   // Draw hospital markers whenever the visible set changes
   useEffect(() => {
@@ -246,21 +409,22 @@ export function CareRoutePage() {
     visibleFacilities.forEach((f) => {
       const color = typeColors[f.facility_type] || '#666';
       const isBest = nearbyBest.some((b) => b.id === f.id) || overallBest.slice(0, 3).some((b) => b.id === f.id);
+      const isLive = f.id >= 100000;
       const size = isBest ? 18 : 12;
       const icon = L.divIcon({
         className: 'custom-marker',
-        html: `<div style="background:${color};width:${size}px;height:${size}px;border-radius:50%;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.4)"></div>`,
+        html: `<div style="background:${color};width:${size}px;height:${size}px;border-radius:50%;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.4)${isLive ? ';opacity:0.85' : ''}"></div>`,
         iconSize: [size, size],
       });
       const marker = L.marker([f.latitude, f.longitude], { icon })
         .addTo(layer)
         .bindPopup(
-          `<strong>${f.name}</strong><br/>${formatDistance(f.distance_km)} · ${f.facility_type.toUpperCase()}<br/><small>${f.address || ''}</small>`
+          `<strong>${f.name}</strong>${isLive ? ' <span style="color:#2563eb">· live</span>' : ''}<br/>${formatDistance(f.distance_km)} · ${f.facility_type.toUpperCase()}<br/><small>${f.address || ''}</small>`
         );
       marker.on('click', () => selectFacility(f));
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allFacilities, filter, searchQuery, nearbyBest, overallBest, mapReady]);
+  }, [allFacilities, filter, searchQuery, nearbyBest, overallBest, mapReady, liveFacilities]);
 
   // ---------------- routing ----------------
 
@@ -474,9 +638,37 @@ export function CareRoutePage() {
         </div>
       </div>
 
+      {loadError && (
+        <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg p-3 flex items-center gap-3">
+          <Siren size={15} className="shrink-0" />
+          <span className="flex-1">{loadError}</span>
+          <button onClick={() => loadFacilities(userPos)} className="btn-secondary text-xs whitespace-nowrap">Retry</button>
+        </div>
+      )}
+
       {locationNote && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg p-3 flex items-start gap-2">
           <Navigation size={15} className="mt-0.5 shrink-0" /> {locationNote}
+        </div>
+      )}
+
+      {liveSearching && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-700 text-xs rounded-lg p-2.5 flex items-center gap-2">
+          <LocateFixed size={13} className="animate-pulse" /> Sensing nearby healthcare places live from OpenStreetMap…
+        </div>
+      )}
+      {!liveSearching && liveNote && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-700 text-xs rounded-lg p-2.5 flex items-start gap-2">
+          <Award size={13} className="mt-0.5 shrink-0" /> {liveNote}
+        </div>
+      )}
+
+      {offlineMode && (
+        <div className="bg-gray-100 border border-gray-300 text-gray-700 text-xs rounded-lg p-2.5 flex items-start gap-2">
+          <Siren size={13} className="mt-0.5 shrink-0" />
+          <span>
+            <strong>You're offline</strong> — showing your last-known hospitals and cached map tiles. Ranking may be out of date; routes and live sensing need a connection.
+          </span>
         </div>
       )}
 
@@ -576,7 +768,11 @@ export function CareRoutePage() {
             </div>
           ) : (
             <p className="text-sm text-gray-500 py-3">
-              {locating ? 'Sensing your location…' : 'Tap “Use my location” or “Set on map” to see hospitals closest to you.'}
+              {locating
+                ? 'Sensing your location…'
+                : liveSearching
+                  ? 'Searching for healthcare places around you…'
+                  : 'Tap “Use my location” or “Set on map” to see hospitals closest to you.'}
             </p>
           )}
         </div>
@@ -614,6 +810,12 @@ export function CareRoutePage() {
 
       {loading ? (
         <LoadingSpinner message="Loading facilities..." />
+      ) : visibleFacilities.length === 0 ? (
+        <div className="card text-center py-8">
+          <p className="text-gray-500 mb-2">No facilities match your search.</p>
+          {loadError && <p className="text-sm text-red-600 mb-3">{loadError}</p>}
+          <button onClick={() => loadFacilities(userPos)} className="btn-primary text-sm">Reload facilities</button>
+        </div>
       ) : (
         <div className="grid sm:grid-cols-2 gap-4">
           {visibleFacilities.map((f) => (
